@@ -4,7 +4,7 @@ workspace:
 
 pipeline:
   test:
-    image: golang:1.6
+    image: golang:1.8
     environment:
       - GO15VENDOREXPERIMENT=1
     commands:
@@ -12,7 +12,7 @@ pipeline:
       - make test test_postgres test_mysql
 
   compile:
-    image: golang:1.6
+    image: golang:1.8
     environment:
       - GO15VENDOREXPERIMENT=1
       - GOPATH=/go
@@ -27,6 +27,7 @@ pipeline:
     acl: public-read
     bucket: downloads.drone.io
     source: release/**/*.*
+    target: /0.6.0/
     access_key: ${AWS_ACCESS_KEY_ID}
     secret_key: ${AWS_SECRET_ACCESS_KEY}
     when:
@@ -38,7 +39,7 @@ pipeline:
     repo: drone/drone
     username: ${DOCKER_USERNAME}
     password: ${DOCKER_PASSWORD}
-    tag: [ "0.5", "0.5.0", "0.5.0-rc", "latest" ]
+    tag: [ 0.6 ]
     when:
       branch: master
       event: push

@@ -8,6 +8,7 @@ type Build struct {
 	Parent    int    `json:"parent"        meddler:"build_parent"`
 	Event     string `json:"event"         meddler:"build_event"`
 	Status    string `json:"status"        meddler:"build_status"`
+	Error     string `json:"error"         meddler:"build_error"`
 	Enqueued  int64  `json:"enqueued_at"   meddler:"build_enqueued"`
 	Created   int64  `json:"created_at"    meddler:"build_created"`
 	Started   int64  `json:"started_at"    meddler:"build_started"`
@@ -21,13 +22,17 @@ type Build struct {
 	Title     string `json:"title"         meddler:"build_title"`
 	Message   string `json:"message"       meddler:"build_message"`
 	Timestamp int64  `json:"timestamp"     meddler:"build_timestamp"`
+	Sender    string `json:"sender"        meddler:"build_sender"`
 	Author    string `json:"author"        meddler:"build_author"`
 	Avatar    string `json:"author_avatar" meddler:"build_avatar"`
 	Email     string `json:"author_email"  meddler:"build_email"`
 	Link      string `json:"link_url"      meddler:"build_link"`
-	Signed    bool   `json:"signed"        meddler:"build_signed"`
-	Verified  bool   `json:"verified"      meddler:"build_verified"`
-	Jobs      []*Job `json:"jobs,omitempty" meddler:"-"`
+	Signed    bool   `json:"signed"        meddler:"build_signed"`   // deprecate
+	Verified  bool   `json:"verified"      meddler:"build_verified"` // deprecate
+	Reviewer  string `json:"reviewed_by"   meddler:"build_reviewer"`
+	Reviewed  int64  `json:"reviewed_at"   meddler:"build_reviewed"`
+	// Jobs      []*Job  `json:"jobs,omitempty"  meddler:"-"`
+	Procs []*Proc `json:"procs,omitempty" meddler:"-"`
 }
 
 type BuildGroup struct {

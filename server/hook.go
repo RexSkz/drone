@@ -1,31 +1,55 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/square/go-jose"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/Sirupsen/logrus"
 	"github.com/drone/drone/model"
 	"github.com/drone/drone/remote"
 	"github.com/drone/drone/shared/httputil"
 	"github.com/drone/drone/shared/token"
 	"github.com/drone/drone/store"
-	"github.com/drone/drone/yaml"
-	"github.com/drone/mq/stomp"
+	"github.com/drone/envsubst"
+
+	"github.com/cncd/pipeline/pipeline/backend"
+	"github.com/cncd/pipeline/pipeline/frontend"
+	"github.com/cncd/pipeline/pipeline/frontend/yaml"
+	"github.com/cncd/pipeline/pipeline/frontend/yaml/compiler"
+	"github.com/cncd/pipeline/pipeline/frontend/yaml/linter"
+	"github.com/cncd/pipeline/pipeline/frontend/yaml/matrix"
+	"github.com/cncd/pipeline/pipeline/rpc"
+	"github.com/cncd/pubsub"
+	"github.com/cncd/queue"
 )
 
+//
+// CANARY IMPLEMENTATION
+//
+// This file is a complete disaster because I'm trying to wedge in some
+// experimental code. Please pardon our appearance during renovations.
+//
+
 var skipRe = regexp.MustCompile(`\[(?i:ci *skip|skip *ci)\]`)
+
+func GetQueueInfo(c *gin.Context) {
+	c.IndentedJSON(200,
+		config.queue.Info(c),
+	)
+}
 
 func PostHook(c *gin.Context) {
 	remote_ := remote.FromContext(c)
 
 	tmprepo, build, err := remote_.Hook(c.Request)
 	if err != nil {
-		log.Errorf("failure to parse hook. %s", err)
+		logrus.Errorf("failure to parse hook. %s", err)
 		c.AbortWithError(400, err)
 		return
 	}
@@ -34,7 +58,7 @@ func PostHook(c *gin.Context) {
 		return
 	}
 	if tmprepo == nil {
-		log.Errorf("failure to ascertain repo from hook.")
+		logrus.Errorf("failure to ascertain repo from hook.")
 		c.Writer.WriteHeader(400)
 		return
 	}
@@ -43,14 +67,14 @@ func PostHook(c *gin.Context) {
 	// wrapped in square brackets appear in the commit message
 	skipMatch := skipRe.FindString(build.Message)
 	if len(skipMatch) > 0 {
-		log.Infof("ignoring hook. %s found in %s", skipMatch, build.Commit)
+		logrus.Infof("ignoring hook. %s found in %s", skipMatch, build.Commit)
 		c.Writer.WriteHeader(204)
 		return
 	}
 
 	repo, err := store.GetRepoOwnerName(c, tmprepo.Owner, tmprepo.Name)
 	if err != nil {
-		log.Errorf("failure to find repo %s/%s from hook. %s", tmprepo.Owner, tmprepo.Name, err)
+		logrus.Errorf("failure to find repo %s/%s from hook. %s", tmprepo.Owner, tmprepo.Name, err)
 		c.AbortWithError(404, err)
 		return
 	}
@@ -60,18 +84,18 @@ func PostHook(c *gin.Context) {
 		return repo.Hash, nil
 	})
 	if err != nil {
-		log.Errorf("failure to parse token from hook for %s. %s", repo.FullName, err)
+		logrus.Errorf("failure to parse token from hook for %s. %s", repo.FullName, err)
 		c.AbortWithError(400, err)
 		return
 	}
 	if parsed.Text != repo.FullName {
-		log.Errorf("failure to verify token from hook. Expected %s, got %s", repo.FullName, parsed.Text)
+		logrus.Errorf("failure to verify token from hook. Expected %s, got %s", repo.FullName, parsed.Text)
 		c.AbortWithStatus(403)
 		return
 	}
 
 	if repo.UserID == 0 {
-		log.Warnf("ignoring hook. repo %s has no owner.", repo.FullName)
+		logrus.Warnf("ignoring hook. repo %s has no owner.", repo.FullName)
 		c.Writer.WriteHeader(204)
 		return
 	}
@@ -84,36 +108,21 @@ func PostHook(c *gin.Context) {
 	}
 
 	if skipped {
-		log.Infof("ignoring hook. repo %s is disabled for %s events.", repo.FullName, build.Event)
+		logrus.Infof("ignoring hook. repo %s is disabled for %s events.", repo.FullName, build.Event)
 		c.Writer.WriteHeader(204)
 		return
 	}
 
 	user, err := store.GetUser(c, repo.UserID)
 	if err != nil {
-		log.Errorf("failure to find repo owner %s. %s", repo.FullName, err)
+		logrus.Errorf("failure to find repo owner %s. %s", repo.FullName, err)
 		c.AbortWithError(500, err)
 		return
 	}
 
-	// if there is no email address associated with the pull request,
-	// we lookup the email address based on the authors github login.
-	//
-	// my initial hesitation with this code is that it has the ability
-	// to expose your email address. At the same time, your email address
-	// is already exposed in the public .git log. So while some people will
-	// a small number of people will probably be upset by this, I'm not sure
-	// it is actually that big of a deal.
-	if len(build.Email) == 0 {
-		author, err := store.GetUserLogin(c, build.Author)
-		if err == nil {
-			build.Email = author.Email
-		}
-	}
-
 	// if the remote has a refresh token, the current access token
 	// may be stale. Therefore, we should refresh prior to dispatching
-	// the job.
+	// the build.
 	if refresher, ok := remote_.(remote.Refresher); ok {
 		ok, _ := refresher.Refresh(user)
 		if ok {
@@ -122,26 +131,11 @@ func PostHook(c *gin.Context) {
 	}
 
 	// fetch the build file from the database
-	config := ToConfig(c)
-	raw, err := remote_.File(user, repo, build, config.Yaml)
+	raw, err := remote_.File(user, repo, build, repo.Config)
 	if err != nil {
-		log.Errorf("failure to get build config for %s. %s", repo.FullName, err)
+		logrus.Errorf("failure to get build config for %s. %s", repo.FullName, err)
 		c.AbortWithError(404, err)
 		return
-	}
-	sec, err := remote_.File(user, repo, build, config.Shasum)
-	if err != nil {
-		log.Debugf("cannot find build secrets for %s. %s", repo.FullName, err)
-		// NOTE we don't exit on failure. The sec file is optional
-	}
-
-	axes, err := yaml.ParseMatrix(raw)
-	if err != nil {
-		c.String(500, "Failed to parse yaml file or calculate matrix. %s", err)
-		return
-	}
-	if len(axes) == 0 {
-		axes = append(axes, yaml.Axis{})
 	}
 
 	netrc, err := remote_.Netrc(user, repo)
@@ -151,99 +145,419 @@ func PostHook(c *gin.Context) {
 	}
 
 	// verify the branches can be built vs skipped
-	branches := yaml.ParseBranch(raw)
-	if !branches.Match(build.Branch) && build.Event != model.EventTag && build.Event != model.EventDeploy {
-		c.String(200, "Branch does not match restrictions defined in yaml")
-		return
-	}
-
-	signature, err := jose.ParseSigned(string(sec))
-	if err != nil {
-		log.Debugf("cannot parse .drone.yml.sig file. %s", err)
-	} else if len(sec) == 0 {
-		log.Debugf("cannot parse .drone.yml.sig file. empty file")
-	} else {
-		build.Signed = true
-		output, err := signature.Verify([]byte(repo.Hash))
-		if err != nil {
-			log.Debugf("cannot verify .drone.yml.sig file. %s", err)
-		} else if string(output) != string(raw) {
-			log.Debugf("cannot verify .drone.yml.sig file. no match")
-		} else {
-			build.Verified = true
+	branches, err := yaml.ParseBytes(raw)
+	if err == nil {
+		if !branches.Branches.Match(build.Branch) && build.Event != model.EventTag && build.Event != model.EventDeploy {
+			c.String(200, "Branch does not match restrictions defined in yaml")
+			return
 		}
 	}
 
-	// update some build fields
-	build.Status = model.StatusPending
-	build.RepoID = repo.ID
-
-	// and use a transaction
-	var jobs []*model.Job
-	for num, axis := range axes {
-		jobs = append(jobs, &model.Job{
-			BuildID:     build.ID,
-			Number:      num + 1,
-			Status:      model.StatusPending,
-			Environment: axis,
-		})
-	}
-	err = store.CreateBuild(c, build, jobs...)
+	secs, err := store.GetMergedSecretList(c, repo)
 	if err != nil {
-		log.Errorf("failure to save commit for %s. %s", repo.FullName, err)
+		logrus.Debugf("Error getting secrets for %s#%d. %s", repo.FullName, build.Number, err)
+	}
+
+	regs, err := store.FromContext(c).RegistryList(repo)
+	if err != nil {
+		logrus.Debugf("Error getting registry credentials for %s#%d. %s", repo.FullName, build.Number, err)
+	}
+
+	// var mustApprove bool
+	// if build.Event == model.EventPull {
+	// 	for _, sec := range secs {
+	// 		if sec.SkipVerify {
+	// 			continue
+	// 		}
+	// 		if sec.MatchEvent(model.EventPull) {
+	// 			mustApprove = true
+	// 			break
+	// 		}
+	// 	}
+	// 	if !mustApprove {
+	// 		logrus.Debugf("no secrets exposed to pull_request: status: accepted")
+	// 	}
+	// }
+
+	// if build.Event == model.EventPull && mustApprove {
+	// 	old, ferr := remote_.FileRef(user, repo, build.Branch, repo.Config)
+	// 	if ferr != nil {
+	// 		build.Status = model.StatusBlocked
+	// 		logrus.Debugf("cannot fetch base yaml: status: blocked")
+	// 	} else if bytes.Equal(old, raw) {
+	// 		build.Status = model.StatusPending
+	// 		logrus.Debugf("base yaml matches head yaml: status: accepted")
+	// 	} else {
+	// 		// this block is executed if the target yaml file
+	// 		// does not match the base yaml.
+	//
+	// 		// TODO unfortunately we have no good way to get the
+	// 		// sender repository permissions unless the user is
+	// 		// a registered drone user.
+	// 		sender, uerr := store.GetUserLogin(c, build.Sender)
+	// 		if uerr != nil {
+	// 			build.Status = model.StatusBlocked
+	// 			logrus.Debugf("sender does not have a drone account: status: blocked")
+	// 		} else {
+	// 			if refresher, ok := remote_.(remote.Refresher); ok {
+	// 				ok, _ := refresher.Refresh(sender)
+	// 				if ok {
+	// 					store.UpdateUser(c, sender)
+	// 				}
+	// 			}
+	// 			// if the sender does not have push access to the
+	// 			// repository the pull request should be blocked.
+	// 			perm, perr := remote_.Perm(sender, repo.Owner, repo.Name)
+	// 			if perr == nil && perm.Push == true {
+	// 				build.Status = model.StatusPending
+	// 				logrus.Debugf("sender %s has push access: status: accepted", sender.Login)
+	// 			} else {
+	// 				build.Status = model.StatusBlocked
+	// 				logrus.Debugf("sender %s does not have push access: status: blocked", sender.Login)
+	// 			}
+	// 		}
+	// 	}
+	// } else {
+	// 	build.Status = model.StatusPending
+	// }
+
+	// update some build fields
+	build.RepoID = repo.ID
+	build.Verified = true
+	build.Status = model.StatusPending
+
+	if err := store.CreateBuild(c, build, build.Procs...); err != nil {
+		logrus.Errorf("failure to save commit for %s. %s", repo.FullName, err)
 		c.AbortWithError(500, err)
 		return
 	}
 
 	c.JSON(200, build)
 
-	url := fmt.Sprintf("%s/%s/%d", httputil.GetURL(c.Request), repo.FullName, build.Number)
-	err = remote_.Status(user, repo, build, url)
-	if err != nil {
-		log.Errorf("error setting commit status for %s/%d", repo.FullName, build.Number)
-	}
+	// if build.Status == model.StatusBlocked {
+	// 	return
+	// }
 
 	// get the previous build so that we can send
 	// on status change notifications
 	last, _ := store.GetBuildLastBefore(c, repo, build.Branch, build.ID)
-	secs, err := store.GetMergedSecretList(c, repo)
+
+	//
+	// BELOW: NEW
+	//
+
+	defer func() {
+		uri := fmt.Sprintf("%s/%s/%d", httputil.GetURL(c.Request), repo.FullName, build.Number)
+		err = remote_.Status(user, repo, build, uri)
+		if err != nil {
+			logrus.Errorf("error setting commit status for %s/%d", repo.FullName, build.Number)
+		}
+	}()
+
+	b := builder{
+		Repo:  repo,
+		Curr:  build,
+		Last:  last,
+		Netrc: netrc,
+		Secs:  secs,
+		Regs:  regs,
+		Link:  httputil.GetURL(c.Request),
+		Yaml:  string(raw),
+	}
+	items, err := b.Build()
 	if err != nil {
-		log.Debugf("Error getting secrets for %s#%d. %s", repo.FullName, build.Number, err)
+		build.Status = model.StatusError
+		build.Started = time.Now().Unix()
+		build.Finished = build.Started
+		build.Error = err.Error()
+		store.UpdateBuild(c, build)
+		return
 	}
 
-	client := stomp.MustFromContext(c)
-	client.SendJSON("/topic/events", model.Event{
+	var pcounter = len(items)
+
+	for _, item := range items {
+		build.Procs = append(build.Procs, item.Proc)
+		item.Proc.BuildID = build.ID
+
+		for _, stage := range item.Config.Stages {
+			var gid int
+			for _, step := range stage.Steps {
+				pcounter++
+				if gid == 0 {
+					gid = pcounter
+				}
+				proc := &model.Proc{
+					BuildID: build.ID,
+					Name:    step.Alias,
+					PID:     pcounter,
+					PPID:    item.Proc.PID,
+					PGID:    gid,
+					State:   model.StatusPending,
+				}
+				build.Procs = append(build.Procs, proc)
+			}
+		}
+	}
+	err = store.FromContext(c).ProcCreate(build.Procs)
+	if err != nil {
+		logrus.Errorf("error persisting procs %s/%d: %s", repo.FullName, build.Number, err)
+	}
+
+	//
+	// publish topic
+	//
+	message := pubsub.Message{
+		Labels: map[string]string{
+			"repo":    repo.FullName,
+			"private": strconv.FormatBool(repo.IsPrivate),
+		},
+	}
+	buildCopy := *build
+	buildCopy.Procs = model.Tree(buildCopy.Procs)
+	message.Data, _ = json.Marshal(model.Event{
 		Type:  model.Enqueued,
 		Repo:  *repo,
-		Build: *build,
-	},
-		stomp.WithHeader("repo", repo.FullName),
-		stomp.WithHeader("private", strconv.FormatBool(repo.IsPrivate)),
-	)
+		Build: buildCopy,
+	})
+	// TODO remove global reference
+	config.pubsub.Publish(c, "topic/events", message)
+	//
+	// end publish topic
+	//
 
-	for _, job := range jobs {
-		broker, _ := stomp.FromContext(c)
-		broker.SendJSON("/queue/pending", &model.Work{
-			Signed:    build.Signed,
-			Verified:  build.Verified,
-			User:      user,
-			Repo:      repo,
-			Build:     build,
-			BuildLast: last,
-			Job:       job,
-			Netrc:     netrc,
-			Yaml:      string(raw),
-			Secrets:   secs,
-			System:    &model.System{Link: httputil.GetURL(c.Request)},
+	for _, item := range items {
+		task := new(queue.Task)
+		task.ID = fmt.Sprint(item.Proc.ID)
+		task.Labels = map[string]string{}
+		task.Labels["platform"] = item.Platform
+		for k, v := range item.Labels {
+			task.Labels[k] = v
+		}
+
+		task.Data, _ = json.Marshal(rpc.Pipeline{
+			ID:      fmt.Sprint(item.Proc.ID),
+			Config:  item.Config,
+			Timeout: b.Repo.Timeout,
+		})
+
+		config.logger.Open(context.Background(), task.ID)
+		config.queue.Push(context.Background(), task)
+	}
+}
+
+// return the metadata from the cli context.
+func metadataFromStruct(repo *model.Repo, build, last *model.Build, proc *model.Proc, link string) frontend.Metadata {
+	return frontend.Metadata{
+		Repo: frontend.Repo{
+			Name:    repo.Name,
+			Link:    repo.Link,
+			Remote:  repo.Clone,
+			Private: repo.IsPrivate,
 		},
-			stomp.WithHeader(
-				"platform",
-				yaml.ParsePlatformDefault(raw, "linux/amd64"),
-			),
-			stomp.WithHeaders(
-				yaml.ParseLabel(raw),
-			),
-		)
+		Curr: frontend.Build{
+			Number:   build.Number,
+			Created:  build.Created,
+			Started:  build.Started,
+			Finished: build.Finished,
+			Status:   build.Status,
+			Event:    build.Event,
+			Link:     build.Link,
+			Target:   build.Deploy,
+			Commit: frontend.Commit{
+				Sha:     build.Commit,
+				Ref:     build.Ref,
+				Refspec: build.Refspec,
+				Branch:  build.Branch,
+				Message: build.Message,
+				Author: frontend.Author{
+					Name:   build.Author,
+					Email:  build.Email,
+					Avatar: build.Avatar,
+				},
+			},
+		},
+		Prev: frontend.Build{
+			Number:   last.Number,
+			Created:  last.Created,
+			Started:  last.Started,
+			Finished: last.Finished,
+			Status:   last.Status,
+			Event:    last.Event,
+			Link:     last.Link,
+			Target:   last.Deploy,
+			Commit: frontend.Commit{
+				Sha:     last.Commit,
+				Ref:     last.Ref,
+				Refspec: last.Refspec,
+				Branch:  last.Branch,
+				Message: last.Message,
+				Author: frontend.Author{
+					Name:   last.Author,
+					Email:  last.Email,
+					Avatar: last.Avatar,
+				},
+			},
+		},
+		Job: frontend.Job{
+			Number: proc.PID,
+			Matrix: proc.Environ,
+		},
+		Sys: frontend.System{
+			Name: "drone",
+			Link: link,
+			Arch: "linux/amd64",
+		},
+	}
+}
+
+type builder struct {
+	Repo  *model.Repo
+	Curr  *model.Build
+	Last  *model.Build
+	Netrc *model.Netrc
+	Secs  []*model.Secret
+	Regs  []*model.Registry
+	Link  string
+	Yaml  string
+}
+
+type buildItem struct {
+	Proc     *model.Proc
+	Platform string
+	Labels   map[string]string
+	Config   *backend.Config
+}
+
+func (b *builder) Build() ([]*buildItem, error) {
+
+	axes, err := matrix.ParseString(b.Yaml)
+	if err != nil {
+		return nil, err
+	}
+	if len(axes) == 0 {
+		axes = append(axes, matrix.Axis{})
 	}
 
+	var items []*buildItem
+	for i, axis := range axes {
+		proc := &model.Proc{
+			BuildID: b.Curr.ID,
+			PID:     i + 1,
+			PGID:    i + 1,
+			State:   model.StatusPending,
+			Environ: axis,
+		}
+
+		metadata := metadataFromStruct(b.Repo, b.Curr, b.Last, proc, b.Link)
+		environ := metadata.Environ()
+		for k, v := range metadata.EnvironDrone() {
+			environ[k] = v
+		}
+		for k, v := range axis {
+			environ[k] = v
+		}
+
+		var secrets []compiler.Secret
+		for _, sec := range b.Secs {
+			if !sec.MatchEvent(b.Curr.Event) {
+				continue
+			}
+			secrets = append(secrets, compiler.Secret{
+				Name:  sec.Name,
+				Value: sec.Value,
+				Match: sec.Images,
+			})
+		}
+
+		y := b.Yaml
+		s, err := envsubst.Eval(y, func(name string) string {
+			return environ[name]
+		})
+		if err != nil {
+			return nil, err
+		}
+		y = s
+
+		parsed, err := yaml.ParseString(y)
+		if err != nil {
+			return nil, err
+		}
+		metadata.Sys.Arch = parsed.Platform
+		if metadata.Sys.Arch == "" {
+			metadata.Sys.Arch = "linux/amd64"
+		}
+
+		lerr := linter.New(
+			linter.WithTrusted(b.Repo.IsTrusted),
+		).Lint(parsed)
+		if lerr != nil {
+			return nil, err
+		}
+
+		var registries []compiler.Registry
+		for _, reg := range b.Regs {
+			registries = append(registries, compiler.Registry{
+				Username: reg.Username,
+				Password: reg.Password,
+				Email:    reg.Email,
+			})
+		}
+
+		ir := compiler.New(
+			compiler.WithEnviron(environ),
+			// TODO ability to customize the escalated plugins
+			compiler.WithEscalated("plugins/docker", "plugins/gcr", "plugins/ecr"),
+			compiler.WithLocal(false),
+			compiler.WithOption(
+				compiler.WithNetrc(
+					b.Netrc.Login,
+					b.Netrc.Password,
+					b.Netrc.Machine,
+				),
+				b.Repo.IsPrivate,
+			),
+			compiler.WithRegistry(registries...),
+			compiler.WithSecret(secrets...),
+			compiler.WithPrefix(
+				fmt.Sprintf(
+					"%d_%d",
+					proc.ID,
+					time.Now().Unix(),
+				),
+			),
+			compiler.WithEnviron(proc.Environ),
+			compiler.WithProxy(),
+			// TODO ability to set global volumes for things like certs
+			compiler.WithVolumes(),
+			compiler.WithWorkspaceFromURL("/drone", b.Curr.Link),
+			compiler.WithMetadata(metadata),
+		).Compile(parsed)
+
+		// for _, sec := range b.Secs {
+		// 	if !sec.MatchEvent(b.Curr.Event) {
+		// 		continue
+		// 	}
+		// 	if b.Curr.Verified || sec.SkipVerify {
+		// 		ir.Secrets = append(ir.Secrets, &backend.Secret{
+		// 			Mask:  sec.Conceal,
+		// 			Name:  sec.Name,
+		// 			Value: sec.Value,
+		// 		})
+		// 	}
+		// }
+
+		item := &buildItem{
+			Proc:     proc,
+			Config:   ir,
+			Labels:   parsed.Labels,
+			Platform: metadata.Sys.Arch,
+		}
+		if item.Labels == nil {
+			item.Labels = map[string]string{}
+		}
+		items = append(items, item)
+	}
+
+	return items, nil
 }

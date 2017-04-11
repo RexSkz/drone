@@ -53,15 +53,16 @@ type pullRequestHook struct {
 			Email    string `json:"email"`
 			Avatar   string `json:"avatar_url"`
 		} `json:"user"`
-		Title     string   `json:"title"`
-		Body      string   `json:"body"`
-		Labels    []string `json:"labels"`
-		State     string   `json:"state"`
-		URL       string   `json:"html_url"`
-		Mergeable bool     `json:"mergeable"`
-		Merged    bool     `json:"merged"`
-		MergeBase string   `json:"merge_base"`
-		Base      struct {
+		Title      string   `json:"title"`
+		Body       string   `json:"body"`
+		Labels     []string `json:"labels"`
+		State      string   `json:"state"`
+		URL        string   `json:"html_url"`
+		Mergeable  bool     `json:"mergeable"`
+		Merged     bool     `json:"merged"`
+		MergeBase  string   `json:"merge_base"`
+		BaseBranch string   `json:"base_branch"`
+		Base       struct {
 			Label string `json:"label"`
 			Ref   string `json:"ref"`
 			Sha   string `json:"sha"`
@@ -80,7 +81,8 @@ type pullRequestHook struct {
 				} `json:"owner"`
 			} `json:"repo"`
 		} `json:"base"`
-		Head struct {
+		HeadBranch string `json:"head_branch"`
+		Head       struct {
 			Label string `json:"label"`
 			Ref   string `json:"ref"`
 			Sha   string `json:"sha"`
@@ -116,6 +118,7 @@ type pullRequestHook struct {
 	} `json:"repository"`
 	Sender struct {
 		ID       int64  `json:"id"`
+		Login    string `json:"login"`
 		Username string `json:"username"`
 		Name     string `json:"full_name"`
 		Email    string `json:"email"`

@@ -1,22 +1,17 @@
 package main
 
 import (
-	"log"
 	"os"
 	"strconv"
 	"text/template"
 
-	"github.com/codegangsta/cli"
+	"github.com/urfave/cli"
 )
 
 var buildInfoCmd = cli.Command{
-	Name:  "info",
-	Usage: "show build details",
-	Action: func(c *cli.Context) {
-		if err := buildInfo(c); err != nil {
-			log.Fatalln(err)
-		}
-	},
+	Name:   "info",
+	Usage:  "show build details",
+	Action: buildInfo,
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  "format",
@@ -32,14 +27,26 @@ func buildInfo(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	number, err := strconv.Atoi(c.Args().Get(1))
-	if err != nil {
-		return err
-	}
+	buildArg := c.Args().Get(1)
 
 	client, err := newClient(c)
 	if err != nil {
 		return err
+	}
+
+	var number int
+	if buildArg == "last" {
+		// Fetch the build number from the last build
+		build, err := client.BuildLast(owner, name, "")
+		if err != nil {
+			return err
+		}
+		number = build.Number
+	} else {
+		number, err = strconv.Atoi(buildArg)
+		if err != nil {
+			return err
+		}
 	}
 
 	build, err := client.Build(owner, name, number)

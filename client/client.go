@@ -102,6 +102,12 @@ type Client interface {
 	// the prior history.
 	BuildFork(string, string, int, map[string]string) (*model.Build, error)
 
+	// BuildApprove approves a blocked build.
+	BuildApprove(string, string, int) (*model.Build, error)
+
+	// BuildDecline declines a blocked build.
+	BuildDecline(string, string, int) (*model.Build, error)
+
 	// BuildLogs returns the build logs for the specified job.
 	BuildLogs(string, string, int, int) (io.ReadCloser, error)
 
@@ -109,6 +115,18 @@ type Client interface {
 	// target environment.
 	Deploy(string, string, int, string, map[string]string) (*model.Build, error)
 
-	// AgentList returns a list of build agents.
-	AgentList() ([]*model.Agent, error)
+	// Registry returns a registry by hostname.
+	Registry(owner, name, hostname string) (*model.Registry, error)
+
+	// RegistryList returns a list of all repository registries.
+	RegistryList(owner, name string) ([]*model.Registry, error)
+
+	// RegistryCreate creates a registry.
+	RegistryCreate(owner, name string, registry *model.Registry) (*model.Registry, error)
+
+	// RegistryUpdate updates a registry.
+	RegistryUpdate(owner, name string, registry *model.Registry) (*model.Registry, error)
+
+	// RegistryDelete deletes a registry.
+	RegistryDelete(owner, name, hostname string) error
 }

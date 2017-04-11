@@ -1,14 +1,15 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/drone/drone/drone/agent"
 	"github.com/drone/drone/version"
 
-	"github.com/codegangsta/cli"
 	"github.com/ianschenck/envflag"
 	_ "github.com/joho/godotenv/autoload"
+	"github.com/urfave/cli"
 )
 
 func main() {
@@ -32,11 +33,11 @@ func main() {
 	}
 	app.Commands = []cli.Command{
 		agent.AgentCmd,
-		agentsCmd,
 		buildCmd,
 		deployCmd,
 		execCmd,
 		infoCmd,
+		registryCmd,
 		secretCmd,
 		serverCmd,
 		signCmd,
@@ -46,5 +47,8 @@ func main() {
 		globalCmd,
 	}
 
-	app.Run(os.Args)
+	if err := app.Run(os.Args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }

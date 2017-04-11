@@ -74,6 +74,10 @@ func buildFromPush(hook *pushHook) *model.Build {
 	if author == "" {
 		author = hook.Sender.Username
 	}
+	sender := hook.Sender.Username
+	if sender == "" {
+		sender = hook.Sender.Login
+	}
 
 	return &model.Build{
 		Event:     model.EventPush,
@@ -85,6 +89,7 @@ func buildFromPush(hook *pushHook) *model.Build {
 		Avatar:    avatar,
 		Author:    author,
 		Timestamp: time.Now().UTC().Unix(),
+		Sender:    sender,
 	}
 }
 
@@ -98,6 +103,10 @@ func buildFromTag(hook *pushHook) *model.Build {
 	if author == "" {
 		author = hook.Sender.Username
 	}
+	sender := hook.Sender.Username
+	if sender == "" {
+		sender = hook.Sender.Login
+	}
 
 	return &model.Build{
 		Event:     model.EventTag,
@@ -108,6 +117,7 @@ func buildFromTag(hook *pushHook) *model.Build {
 		Message:   fmt.Sprintf("created tag %s", hook.Ref),
 		Avatar:    avatar,
 		Author:    author,
+		Sender:    sender,
 		Timestamp: time.Now().UTC().Unix(),
 	}
 }
@@ -118,19 +128,24 @@ func buildFromPullRequest(hook *pullRequestHook) *model.Build {
 		hook.Repo.URL,
 		fixMalformedAvatar(hook.PullRequest.User.Avatar),
 	)
+	sender := hook.Sender.Username
+	if sender == "" {
+		sender = hook.Sender.Login
+	}
 	build := &model.Build{
 		Event:   model.EventPull,
 		Commit:  hook.PullRequest.Head.Sha,
 		Link:    hook.PullRequest.URL,
 		Ref:     fmt.Sprintf("refs/pull/%d/head", hook.Number),
-		Branch:  hook.PullRequest.Base.Ref,
+		Branch:  hook.PullRequest.BaseBranch,
 		Message: hook.PullRequest.Title,
 		Author:  hook.PullRequest.User.Username,
 		Avatar:  avatar,
+		Sender:  sender,
 		Title:   hook.PullRequest.Title,
 		Refspec: fmt.Sprintf("%s:%s",
-			hook.PullRequest.Head.Ref,
-			hook.PullRequest.Base.Ref,
+			hook.PullRequest.HeadBranch,
+			hook.PullRequest.BaseBranch,
 		),
 	}
 	return build

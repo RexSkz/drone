@@ -1,6 +1,6 @@
 package main
 
-import "github.com/codegangsta/cli"
+import "github.com/urfave/cli"
 
 var buildCmd = cli.Command{
 	Name:  "build",
@@ -8,9 +8,12 @@ var buildCmd = cli.Command{
 	Subcommands: []cli.Command{
 		buildListCmd,
 		buildLastCmd,
+		buildLogsCmd,
 		buildInfoCmd,
 		buildStopCmd,
 		buildStartCmd,
+		buildApproveCmd,
+		buildDeclineCmd,
 		buildQueueCmd,
 	},
 }

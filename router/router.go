@@ -2,6 +2,7 @@ package router
 
 import (
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/drone/drone/router/middleware/session"
 	"github.com/drone/drone/router/middleware/token"
 	"github.com/drone/drone/server"
+	"github.com/drone/drone/server/debug"
 	"github.com/drone/drone/server/template"
 
 	"github.com/drone/drone-ui/dist"
@@ -20,12 +22,20 @@ func Load(middleware ...gin.HandlerFunc) http.Handler {
 	e := gin.New()
 	e.Use(gin.Recovery())
 
-	e.SetHTMLTemplate(template.Load())
+	if pattern := os.Getenv("DRONE_TEMPLATE_GLOB"); pattern == "" {
+		e.SetHTMLTemplate(template.Load())
+	} else {
+		e.SetHTMLTemplate(template.Glob(pattern))
+	}
 
-	fs := http.FileServer(dist.AssetFS())
-	e.GET("/static/*filepath", func(c *gin.Context) {
-		fs.ServeHTTP(c.Writer, c.Request)
-	})
+	if dir := os.Getenv("DRONE_STATIC_DIR"); dir == "" {
+		fs := http.FileServer(dist.AssetFS())
+		e.GET("/static/*filepath", func(c *gin.Context) {
+			fs.ServeHTTP(c.Writer, c.Request)
+		})
+	} else {
+		e.Static("/static", dir)
+	}
 
 	e.Use(header.NoCache)
 	e.Use(header.Options)
@@ -38,8 +48,6 @@ func Load(middleware ...gin.HandlerFunc) http.Handler {
 	e.GET("/login/form", server.ShowLoginForm)
 	e.GET("/logout", server.GetLogout)
 	e.NoRoute(server.ShowIndex)
-
-	// TODO above will Go away with React UI
 
 	user := e.Group("/api/user")
 	{
@@ -96,7 +104,7 @@ func Load(middleware ...gin.HandlerFunc) http.Handler {
 			repo.GET("", server.GetRepo)
 			repo.GET("/builds", server.GetBuilds)
 			repo.GET("/builds/:number", server.GetBuild)
-			repo.GET("/logs/:number/:job", server.GetBuildLogs)
+			repo.GET("/logs/:number/:ppid/:proc", server.GetBuildLogs)
 			repo.POST("/sign", session.MustPush, server.Sign)
 
 			repo.GET("/secrets", session.MustPush, server.GetSecrets)
@@ -104,11 +112,20 @@ func Load(middleware ...gin.HandlerFunc) http.Handler {
 			repo.DELETE("/secrets/:secret", session.MustPush, server.DeleteSecret)
 
 			// requires push permissions
+			repo.GET("/registry", session.MustPush, server.GetRegistryList)
+			repo.POST("/registry", session.MustPush, server.PostRegistry)
+			repo.GET("/registry/:address", session.MustPush, server.GetRegistry)
+			repo.PATCH("/registry/:address", session.MustPush, server.PatchRegistry)
+			repo.DELETE("/registry/:address", session.MustPush, server.DeleteRegistry)
+
+			// requires push permissions
 			repo.PATCH("", session.MustPush, server.PatchRepo)
 			repo.DELETE("", session.MustRepoAdmin(), server.DeleteRepo)
 			repo.POST("/chown", session.MustRepoAdmin(), server.ChownRepo)
 
 			repo.POST("/builds/:number", session.MustPush, server.PostBuild)
+			repo.POST("/builds/:number/approve", session.MustPush, server.PostApproval)
+			repo.POST("/builds/:number/decline", session.MustPush, server.PostDecline)
 			repo.DELETE("/builds/:number/:job", session.MustPush, server.DeleteBuild)
 		}
 	}
@@ -124,13 +141,22 @@ func Load(middleware ...gin.HandlerFunc) http.Handler {
 
 	ws := e.Group("/ws")
 	{
-		ws.GET("/broker", server.Broker)
+		ws.GET("/broker", server.RPCHandler)
+		ws.GET("/rpc", server.RPCHandler)
 		ws.GET("/feed", server.EventStream)
 		ws.GET("/logs/:owner/:name/:build/:number",
 			session.SetRepo(),
 			session.SetPerm(),
 			session.MustPull,
 			server.LogStream,
+		)
+	}
+
+	info := e.Group("/api/info")
+	{
+		info.GET("/queue",
+			session.MustAdmin(),
+			server.GetQueueInfo,
 		)
 	}
 
@@ -147,47 +173,27 @@ func Load(middleware ...gin.HandlerFunc) http.Handler {
 		builds.GET("", server.GetBuildQueue)
 	}
 
-	agents := e.Group("/api/agents")
+	debugger := e.Group("/api/debug")
 	{
-		agents.Use(session.MustAdmin())
-		agents.GET("", server.GetAgents)
+		debugger.Use(session.MustAdmin())
+		debugger.GET("/pprof/", debug.IndexHandler())
+		debugger.GET("/pprof/heap", debug.HeapHandler())
+		debugger.GET("/pprof/goroutine", debug.GoroutineHandler())
+		debugger.GET("/pprof/block", debug.BlockHandler())
+		debugger.GET("/pprof/threadcreate", debug.ThreadCreateHandler())
+		debugger.GET("/pprof/cmdline", debug.CmdlineHandler())
+		debugger.GET("/pprof/profile", debug.ProfileHandler())
+		debugger.GET("/pprof/symbol", debug.SymbolHandler())
+		debugger.POST("/pprof/symbol", debug.SymbolHandler())
+		debugger.GET("/pprof/trace", debug.TraceHandler())
 	}
-
-	debug := e.Group("/api/debug")
-	{
-		debug.Use(session.MustAdmin())
-		debug.GET("/pprof/", server.IndexHandler())
-		debug.GET("/pprof/heap", server.HeapHandler())
-		debug.GET("/pprof/goroutine", server.GoroutineHandler())
-		debug.GET("/pprof/block", server.BlockHandler())
-		debug.GET("/pprof/threadcreate", server.ThreadCreateHandler())
-		debug.GET("/pprof/cmdline", server.CmdlineHandler())
-		debug.GET("/pprof/profile", server.ProfileHandler())
-		debug.GET("/pprof/symbol", server.SymbolHandler())
-		debug.POST("/pprof/symbol", server.SymbolHandler())
-		debug.GET("/pprof/trace", server.TraceHandler())
-	}
-
-	// DELETE THESE
-	// gitlab := e.Group("/gitlab/:owner/:name")
-	// {
-	// 	gitlab.Use(session.SetRepo())
-	// 	gitlab.GET("/commits/:sha", GetCommit)
-	// 	gitlab.GET("/pulls/:number", GetPullRequest)
-	//
-	// 	redirects := gitlab.Group("/redirect")
-	// 	{
-	// 		redirects.GET("/commits/:sha", RedirectSha)
-	// 		redirects.GET("/pulls/:number", RedirectPullRequest)
-	// 	}
-	// }
-
-	// bots := e.Group("/bots")
-	// {
-	// 	bots.Use(session.MustUser())
-	// 	bots.POST("/slack", Slack)
-	// 	bots.POST("/slack/:command", Slack)
-	// }
 
 	return e
 }
+
+// type FileHandler interface {
+// 	Index(res http.ResponseWriter, data interface{}) error
+// 	Login(res http.ResponseWriter, data interface{}) error
+// 	Error(res http.ResponseWriter, data interface{}) error
+// 	Asset(res http.ResponseWriter, req *http.Request)
+// }

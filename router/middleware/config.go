@@ -3,8 +3,8 @@ package middleware
 import (
 	"github.com/drone/drone/model"
 
-	"github.com/codegangsta/cli"
 	"github.com/gin-gonic/gin"
+	"github.com/urfave/cli"
 )
 
 const configKey = "config"
@@ -22,8 +22,6 @@ func Config(cli *cli.Context) gin.HandlerFunc {
 func setupConfig(c *cli.Context) *model.Config {
 	return &model.Config{
 		Open:   c.Bool("open"),
-		Yaml:   c.String("yaml"),
-		Shasum: c.String("yaml") + ".sig",
 		Secret: c.String("agent-secret"),
 		Admins: sliceToMap(c.StringSlice("admin")),
 		Orgs:   sliceToMap(c.StringSlice("orgs")),
